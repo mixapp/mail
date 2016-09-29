@@ -1,0 +1,31 @@
+{
+    "folders":
+    [
+        {
+            "path": "."
+        }
+    ],
+
+    "env": {
+        "GOPATH": "${project_path:Default}:$GOPATH",
+        "GOBIN": "${project_path:Default}/bin",
+        "PATH": "$${project_path:Default}/bin:$PATH"
+    },
+
+    "build_systems": [
+        {
+            "name": "Test",
+            "shell_cmd": "go test"
+        },
+
+        {
+            "name": "Buld",
+            "shell_cmd": "cd '${project_path:Default}' && go build"
+        },
+
+        {
+            "name": "Dependences",
+            "shell_cmd": "go get github.com/IntelliQru/config"
+        },
+     ]
+}
