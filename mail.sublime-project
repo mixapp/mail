@@ -22,10 +22,5 @@
             "name": "Buld",
             "shell_cmd": "cd '${project_path:Default}' && go build"
         },
-
-        {
-            "name": "Dependences",
-            "shell_cmd": "go get github.com/IntelliQru/config"
-        },
      ]
 }

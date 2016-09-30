@@ -1,11 +1,10 @@
 package mail
 
 import (
-	"github.com/IntelliQru/config"
-
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"fmt"
 	"io/ioutil"
 	"mime"
 	"net"
@@ -15,17 +14,22 @@ import (
 	"time"
 )
 
+type SmtpClient struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	From     string
+}
+
 type Attachment struct {
 	Filename string
 	Data     []byte
 	Inline   bool
 }
+
 type Message struct {
-	host            string
-	port            string
-	user            string
-	password        string
-	From            string
+	smtpClient      SmtpClient
 	To              string
 	Cc              []string
 	Bcc             []string
@@ -36,7 +40,20 @@ type Message struct {
 	Attachments     map[string]*Attachment
 }
 
+func NewMessage(smtpClient *SmtpClient, to string, subject string, body string) *Message {
+
+	return &Message{
+		smtpClient:      *smtpClient,
+		Subject:         subject,
+		To:              to,
+		Body:            body,
+		BodyContentType: "text/html",
+		Attachments:     make(map[string]*Attachment),
+	}
+}
+
 func (m *Message) Attach(file string, inline bool) error {
+
 	data, err := ioutil.ReadFile(file)
 	if err != nil {
 		return err
@@ -53,26 +70,13 @@ func (m *Message) Attach(file string, inline bool) error {
 	return nil
 }
 
-func NewMail(to string, subject string, body string) *Message {
-	m := &Message{Subject: subject, To: to, Body: body, BodyContentType: "text/html"}
-	m.Attachments = make(map[string]*Attachment)
-	return m
-}
-
 func (m *Message) SendMail() error {
 
-	m.host = config.CFG.Str(config.CFG_SMTP_HOST)
-	m.port = config.CFG.Str(config.CFG_SMTP_PORT)
-	m.user = config.CFG.Str(config.CFG_SMTP_USER)
-	m.password = config.CFG.Str(config.CFG_SMTP_PASSWORD)
-	m.From = config.CFG.Str(config.CFG_SMTP_FROM)
-
 	buf := bytes.NewBuffer(nil)
-	buf.WriteString("From: " + m.From + "\r\n")
+	buf.WriteString("From: " + m.smtpClient.From + "\r\n")
 	buf.WriteString("To: " + m.To + "\r\n")
 	buf.WriteString("MIME-Version: 1.0\r\n")
-	t := time.Now()
-	buf.WriteString("Date: " + t.Format(time.RFC822) + "\r\n")
+	buf.WriteString("Date: " + time.Now().Format(time.RFC822) + "\r\n")
 
 	if len(m.Cc) > 0 {
 		buf.WriteString("Cc: " + strings.Join(m.Cc, ",") + "\r\n")
@@ -133,9 +137,9 @@ func (m *Message) SendMail() error {
 	}
 
 	/*=======================================*/
-	servername := m.host + ":" + m.port
+	servername := fmt.Sprintf("%s:%s", m.smtpClient.Host, m.smtpClient.Port)
 	host, _, _ := net.SplitHostPort(servername)
-	auth := smtp.PlainAuth("", m.user, m.password, host)
+	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
 
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: true,
@@ -161,7 +165,7 @@ func (m *Message) SendMail() error {
 	}
 
 	// To && From
-	if err = c.Mail(m.From); err != nil {
+	if err = c.Mail(m.smtpClient.From); err != nil {
 		return err
 	}
 
