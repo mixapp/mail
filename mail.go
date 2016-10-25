@@ -146,7 +146,11 @@ func (m *Message) SendMail() error {
 		ServerName:         host,
 	}
 
-	conn, err := tls.Dial("tcp", servername, tlsconfig)
+	dl := new(net.Dialer)
+	dl.Timeout = 10 * time.Second
+	conn, err := tls.DialWithDialer(dl, "tcp", servername, tlsconfig)
+
+	//conn, err := tls.Dial("tcp", servername, tlsconfig)
 	if err != nil {
 		return err
 	}
