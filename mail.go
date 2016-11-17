@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"mime"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"path/filepath"
 	"strings"
@@ -89,7 +90,7 @@ func (m *Message) SendMail() error {
 	}
 
 	/* Генерация тела сообщения */
-	boundary := "f46d043c813270fc6b04c2d223da"
+	const boundary = "f46d043c813270fc6b04c2d223da"
 
 	if len(m.Attachments) > 0 {
 		buf.WriteString("Content-Type: multipart/mixed; boundary=" + boundary + "\r\n\r\n")
@@ -169,7 +170,12 @@ func (m *Message) SendMail() error {
 	}
 
 	// To && From
-	if err = c.Mail(m.smtpClient.From); err != nil {
+	emailFrom, err := mail.ParseAddress(m.smtpClient.From)
+	if err != nil {
+		return err
+	}
+
+	if err = c.Mail(emailFrom.Address); err != nil {
 		return err
 	}
 
