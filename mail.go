@@ -20,6 +20,7 @@ type SmtpClient struct {
 	User     string
 	Password string
 	From     string
+	TLS      bool
 }
 
 type Attachment struct {
@@ -140,6 +141,17 @@ func (m *Message) SendMail() error {
 	servername := fmt.Sprintf("%s:%s", m.smtpClient.Host, m.smtpClient.Port)
 	host, _, _ := net.SplitHostPort(servername)
 	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
+
+	if !m.smtpClient.TLS {
+		err := smtp.SendMail(servername, auth, m.smtpClient.From, []string{m.To}, buf.Bytes())
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	/* Актуально для TLS */
 
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: true,
