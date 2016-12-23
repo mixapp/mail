@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"gopkg.in/gomail.v2"
+	"strconv"
 )
 
 type SmtpClient struct {
@@ -144,12 +146,19 @@ func (m *Message) SendMail() error {
 	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
 
 	if !m.smtpClient.TLS {
-		err := smtp.SendMail(servername, auth, m.smtpClient.From, []string{m.To}, buf.Bytes())
-		if err != nil {
-			return err
-		}
 
-		return nil
+		mail := gomail.NewMessage()
+		mail.SetHeader("From", m.smtpClient.From)
+		mail.SetHeader("To", m.To)
+		mail.SetHeader("Subject", m.Subject)
+		mail.SetBody(m.BodyContentType, m.Body)
+
+		port, _ := strconv.Atoi(m.smtpClient.Port)
+		d := gomail.NewDialer(m.smtpClient.Host, port, m.smtpClient.User, m.smtpClient.Password)
+		d.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+
+		err := d.DialAndSend(mail)
+		return err
 	}
 
 	/* Актуально для TLS */
