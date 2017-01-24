@@ -7,14 +7,16 @@ import (
 	"fmt"
 	"io/ioutil"
 	"mime"
+	"mime/multipart"
 	"net"
+	"net/http"
 	"net/mail"
 	"net/smtp"
 	"path/filepath"
-	"strings"
-	"time"
-	"gopkg.in/gomail.v2"
 	"strconv"
+	"time"
+
+	"gopkg.in/gomail.v2"
 )
 
 type SmtpClient struct {
@@ -76,74 +78,69 @@ func (m *Message) Attach(file string, inline bool) error {
 
 func (m *Message) SendMail() error {
 
-	buf := bytes.NewBuffer(nil)
-	buf.WriteString("From: " + m.smtpClient.From + "\r\n")
-	buf.WriteString("To: " + m.To + "\r\n")
-	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString("Date: " + time.Now().Format(time.RFC822) + "\r\n")
+	header := Header{}
+	header.Set("MIME-Version", "1.0")
+	header.Set("Subject", m.Subject)
+	header.SetDate("Date", time.Now())
+	header.SetAddress("From", m.smtpClient.From)
+	header.SetAddress("To", m.To)
 
 	if len(m.Cc) > 0 {
-		buf.WriteString("Cc: " + strings.Join(m.Cc, ",") + "\r\n")
+		header.SetAddress("Cc", m.Cc...)
 	}
 
-	buf.WriteString("Subject: " + m.Subject + "\r\n")
+	if len(m.Bcc) > 0 {
+		header.SetAddress("Bcc", m.Bcc...)
+	}
 
 	if len(m.ReplyTo) > 0 {
-		buf.WriteString("Reply-To: " + m.ReplyTo + "\r\n")
+		header.SetAddress("Reply-To", m.ReplyTo)
 	}
 
-	/* Генерация тела сообщения */
-	const boundary = "f46d043c813270fc6b04c2d223da"
+	data := bytes.NewBuffer(nil)
+	body := []byte(m.Body)
 
-	if len(m.Attachments) > 0 {
-		buf.WriteString("Content-Type: multipart/mixed; boundary=" + boundary + "\r\n\r\n")
-		buf.WriteString("--" + boundary + "\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-		buf.WriteString("Content-Type: " + m.BodyContentType + "; charset=utf-8\r\n\r\n")
-		buf.WriteString(m.Body)
-		buf.WriteString("\r\n")
-	} else {
-		buf.WriteString("Content-Type: " + m.BodyContentType + "; charset=utf-8\r\n\r\n")
-		buf.WriteString(m.Body)
-		buf.WriteString("\r\n")
-	}
+	switch len(m.Attachments) {
+	case 0:
+		header.Set("Content-Type", getContentType(body))
+		data.Write(body)
 
-	if len(m.Attachments) > 0 {
-		for _, attachment := range m.Attachments {
-			buf.WriteString("\r\n\r\n--" + boundary + "\r\n")
+	default:
 
-			if attachment.Inline {
-				buf.WriteString("Content-Type: message/rfc822\r\n")
-				buf.WriteString("Content-Disposition: inline; filename=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n\r\n")
+		multipartWriter := multipart.NewWriter(data)
+		header.SetValue("Content-Type", "multipart/mixed", HeaderParams{"boundary": multipartWriter.Boundary()})
 
-				buf.Write(attachment.Data)
-			} else {
-				buf.WriteString("Content-Disposition: attachment; filename=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n")
-				buf.WriteString("Content-Transfer-Encoding: base64\r\n")
-				buf.WriteString("Content-Type: application/octet-stream; name=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n\r\n")
-
-				b := make([]byte, base64.StdEncoding.EncodedLen(len(attachment.Data)))
-				base64.StdEncoding.Encode(b, attachment.Data)
-
-				// write base64 content in lines of up to 76 chars
-				for i, l := 0, len(b); i < l; i++ {
-					buf.WriteByte(b[i])
-					if (i+1)%76 == 0 {
-						buf.WriteString("\r\n")
-					}
-				}
-			}
-
-			buf.WriteString("\r\n--" + boundary)
+		if err := attachData(multipartWriter, body, true, ""); err != nil {
+			return err
 		}
 
-		buf.WriteString("--")
+		for _, attachment := range m.Attachments {
+			if err := attachData(multipartWriter, attachment.Data, attachment.Inline, attachment.Filename); err != nil {
+				return err
+			}
+		}
+
+		if err := multipartWriter.Close(); err != nil {
+			return err
+		}
 	}
 
-	/*=======================================*/
+	msg := bytes.NewBuffer(header.Bytes())
+	msg.WriteString("\r\n")
+	msg.Write(data.Bytes())
+
 	servername := fmt.Sprintf("%s:%s", m.smtpClient.Host, m.smtpClient.Port)
 	host, _, _ := net.SplitHostPort(servername)
 	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
+
+	// Connect to the server, authenticate, set the sender and recipient,
+	// and send the email all in one step.
+	err := smtp.SendMail(servername, auth, m.smtpClient.From, []string{m.To}, msg.Bytes())
+	if err != nil {
+		return err
+	}
+
+	//TODO проверить
 
 	if !m.smtpClient.TLS {
 
@@ -210,10 +207,10 @@ func (m *Message) SendMail() error {
 		return err
 	}
 
-	_, err = w.Write(buf.Bytes())
-	if err != nil {
-		return err
-	}
+	// _, err = w.Write(buf.Bytes())
+	// if err != nil {
+	// 	return err
+	// }
 
 	err = w.Close()
 	if err != nil {
@@ -221,4 +218,60 @@ func (m *Message) SendMail() error {
 	}
 
 	return nil
+}
+
+func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, filename string) error {
+
+	// Example:
+	// 	--3379bd9a9b4ba7731a26ac044694f6f30cd02b0f9fd0c9a123531d163625
+	// Content-Description: .gitignore
+	// Content-Disposition: inline; filename=".gitignore"
+	// Content-Transfer-Encoding: base64
+	// Content-Type: text/html; charset=utf-8; name=".gitignore"
+
+	// PGh0bWw+PC9odG1sPg==
+	// --3379bd9a9b4ba7731a26ac044694f6f30cd02b0f9fd0c9a123531d163625--
+
+	var (
+		contentDescription                   string
+		contentTypeParams, dispositionParams = HeaderParams{}, HeaderParams{}
+	)
+
+	data := []byte(base64.StdEncoding.EncodeToString(src))
+
+	dispositionType := "attachment"
+	if inline {
+		dispositionType = "inline"
+	}
+
+	if len(filename) > 0 {
+		dispositionParams["filename"] = filename
+		contentTypeParams["name"] = filename
+		contentDescription = filename
+	}
+
+	header := Header{}
+	header.Set("Content-Transfer-Encoding", "base64")
+	header.SetValue("Content-Type", getContentType(src), contentTypeParams)
+	header.SetValue("Content-Disposition", dispositionType, dispositionParams)
+
+	if len(contentDescription) > 0 {
+		header.Set("Content-Description", contentDescription)
+	}
+
+	if part, err := multipartWriter.CreatePart(header.MIMEHeader()); err != nil {
+		return err
+	} else {
+		part.Write(data)
+	}
+
+	return nil
+}
+
+func getQEncodeString(src string) string {
+	return mime.QEncoding.Encode("utf-8", src)
+}
+
+func getContentType(src []byte) string {
+	return http.DetectContentType(src)
 }
