@@ -13,10 +13,8 @@ import (
 	"net/mail"
 	"net/smtp"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"time"
-
-	"gopkg.in/gomail.v2"
 )
 
 type SmtpClient struct {
@@ -25,7 +23,7 @@ type SmtpClient struct {
 	User     string
 	Password string
 	From     string
-	TLS      bool
+	TLS      bool // TODO remove, because don't use in the this library
 }
 
 type Attachment struct {
@@ -42,7 +40,7 @@ type Message struct {
 	ReplyTo         string
 	Subject         string
 	Body            string
-	BodyContentType string
+	BodyContentType string // TODO remove, because don't use in the this library
 	Attachments     map[string]*Attachment
 }
 
@@ -53,7 +51,7 @@ func NewMessage(smtpClient *SmtpClient, to string, subject string, body string) 
 		Subject:         subject,
 		To:              to,
 		Body:            body,
-		BodyContentType: "text/html",
+		BodyContentType: getContentType([]byte(body)), // TODO remove, because don't use in the this library
 		Attachments:     make(map[string]*Attachment),
 	}
 }
@@ -78,39 +76,55 @@ func (m *Message) Attach(file string, inline bool) error {
 
 func (m *Message) SendMail() error {
 
+	// MESSAGE HEADER
+
 	header := Header{}
-	header.Set("MIME-Version", "1.0")
-	header.Set("Subject", m.Subject)
+	header.SetString("MIME-Version", "1.0")
+	header.SetString("Subject", m.Subject)
 	header.SetDate("Date", time.Now())
-	header.SetAddress("From", m.smtpClient.From)
-	header.SetAddress("To", m.To)
+
+	if err := header.SetAddress("From", m.smtpClient.From); err != nil {
+		return err
+	}
+
+	if err := header.SetAddress("To", m.To); err != nil {
+		return err
+	}
 
 	if len(m.Cc) > 0 {
-		header.SetAddress("Cc", m.Cc...)
+		if err := header.SetAddress("Cc", m.Cc...); err != nil {
+			return err
+		}
 	}
 
 	if len(m.Bcc) > 0 {
-		header.SetAddress("Bcc", m.Bcc...)
+		if err := header.SetAddress("Bcc", m.Bcc...); err != nil {
+			return err
+		}
 	}
 
 	if len(m.ReplyTo) > 0 {
-		header.SetAddress("Reply-To", m.ReplyTo)
+		if err := header.SetAddress("Reply-To", m.ReplyTo); err != nil {
+			return err
+		}
 	}
 
-	data := bytes.NewBuffer(nil)
-	body := []byte(m.Body)
+	// MESSAGE BODY
+
+	body := bytes.NewBuffer(nil)
+	bodySrc := []byte(m.Body)
 
 	switch len(m.Attachments) {
 	case 0:
-		header.Set("Content-Type", getContentType(body))
-		data.Write(body)
+		header.SetString("Content-Type", getContentType(bodySrc))
+		body.Write(bodySrc)
 
 	default:
 
-		multipartWriter := multipart.NewWriter(data)
+		multipartWriter := multipart.NewWriter(body)
 		header.SetValue("Content-Type", "multipart/mixed", HeaderParams{"boundary": multipartWriter.Boundary()})
 
-		if err := attachData(multipartWriter, body, true, ""); err != nil {
+		if err := attachData(multipartWriter, bodySrc, true, ""); err != nil {
 			return err
 		}
 
@@ -125,99 +139,113 @@ func (m *Message) SendMail() error {
 		}
 	}
 
-	msg := bytes.NewBuffer(header.Bytes())
-	msg.WriteString("\r\n")
-	msg.Write(data.Bytes())
+	// SEND MESSAGE
 
-	servername := fmt.Sprintf("%s:%s", m.smtpClient.Host, m.smtpClient.Port)
-	host, _, _ := net.SplitHostPort(servername)
-	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
-
-	// Connect to the server, authenticate, set the sender and recipient,
-	// and send the email all in one step.
-	err := smtp.SendMail(servername, auth, m.smtpClient.From, []string{m.To}, msg.Bytes())
+	c, err := newNetSmtpClient(&m.smtpClient)
 	if err != nil {
 		return err
 	}
+	defer c.Close()
 
-	//TODO проверить
-
-	if !m.smtpClient.TLS {
-
-		mail := gomail.NewMessage()
-		mail.SetHeader("From", m.smtpClient.From)
-		mail.SetHeader("To", m.To)
-		mail.SetHeader("Subject", m.Subject)
-		mail.SetBody(m.BodyContentType, m.Body)
-
-		port, _ := strconv.Atoi(m.smtpClient.Port)
-		d := gomail.NewDialer(m.smtpClient.Host, port, m.smtpClient.User, m.smtpClient.Password)
-		d.TLSConfig = &tls.Config{InsecureSkipVerify: true}
-
-		err := d.DialAndSend(mail)
+	if e, err := mail.ParseAddress(m.smtpClient.From); err != nil {
+		return err
+	} else if err = c.Mail(e.Address); err != nil {
 		return err
 	}
 
-	/* Актуально для TLS */
+	recipientsList := []string{m.To}
+	if m.Cc != nil {
+		recipientsList = append(recipientsList, strings.Join(m.Cc, ","))
+	}
+	if m.Bcc != nil {
+		recipientsList = append(recipientsList, strings.Join(m.Bcc, ","))
+	}
+
+	for _, recipients := range recipientsList {
+
+		if emails, err := mail.ParseAddressList(recipients); err != nil {
+			return err
+		} else {
+			for _, e := range emails {
+				if err = c.Rcpt(e.Address); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	msg := bytes.NewBuffer(header.Bytes())
+	msg.WriteString("\r\n")
+	msg.Write(body.Bytes())
+
+	if w, err := c.Data(); err != nil {
+		return err
+	} else if _, err = w.Write(msg.Bytes()); err != nil {
+		return err
+	} else if err = w.Close(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
+
+	servername := fmt.Sprintf("%s:%s", smtpClient.Host, smtpClient.Port)
+	host, port, err := net.SplitHostPort(servername)
+	if err != nil {
+		return nil, err
+	}
+
+	var IS_SSL = port == "465"
 
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         host,
 	}
 
-	dl := new(net.Dialer)
-	dl.Timeout = 10 * time.Second
-	conn, err := tls.DialWithDialer(dl, "tcp", servername, tlsconfig)
-
-	//conn, err := tls.Dial("tcp", servername, tlsconfig)
+	conn, err := net.DialTimeout("tcp", servername, 10*time.Second)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	if IS_SSL {
+		conn = tls.Client(conn, tlsconfig)
 	}
 
 	c, err := smtp.NewClient(conn, host)
-	defer func() {
-		c.Quit()
-	}()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Auth
-	if err = c.Auth(auth); err != nil {
-		return err
+	if !IS_SSL {
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			if err := c.StartTLS(tlsconfig); err != nil {
+				c.Close()
+				return nil, err
+			}
+		}
 	}
 
-	// To && From
-	emailFrom, err := mail.ParseAddress(m.smtpClient.From)
-	if err != nil {
-		return err
+	if len(smtpClient.User) > 0 {
+
+		if ok, auths := c.Extension("AUTH"); ok {
+			var auth smtp.Auth
+
+			if strings.Contains(auths, "CRAM-MD5") {
+				auth = smtp.CRAMMD5Auth(smtpClient.User, smtpClient.Password)
+			} else {
+				auth = smtp.PlainAuth("", smtpClient.User, smtpClient.Password, host)
+			}
+
+			if err := c.Auth(auth); err != nil {
+				c.Close()
+				return nil, err
+			}
+		}
 	}
 
-	if err = c.Mail(emailFrom.Address); err != nil {
-		return err
-	}
-
-	if err = c.Rcpt(m.To); err != nil {
-		return err
-	}
-
-	// Data
-	w, err := c.Data()
-	if err != nil {
-		return err
-	}
-
-	// _, err = w.Write(buf.Bytes())
-	// if err != nil {
-	// 	return err
-	// }
-
-	err = w.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c, nil
 }
 
 func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, filename string) error {
@@ -251,12 +279,12 @@ func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, file
 	}
 
 	header := Header{}
-	header.Set("Content-Transfer-Encoding", "base64")
+	header.SetString("Content-Transfer-Encoding", "base64")
 	header.SetValue("Content-Type", getContentType(src), contentTypeParams)
 	header.SetValue("Content-Disposition", dispositionType, dispositionParams)
 
 	if len(contentDescription) > 0 {
-		header.Set("Content-Description", contentDescription)
+		header.SetString("Content-Description", contentDescription)
 	}
 
 	if part, err := multipartWriter.CreatePart(header.MIMEHeader()); err != nil {

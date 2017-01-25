@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/mail"
 	"net/textproto"
@@ -18,7 +19,7 @@ func (h Header) MIMEHeader() textproto.MIMEHeader {
 	return textproto.MIMEHeader(h)
 }
 
-func (h Header) Set(key string, value string) {
+func (h Header) SetString(key string, value string) {
 	h.set(key, getQEncodeString(value))
 }
 
@@ -29,10 +30,14 @@ func (h Header) SetDate(key string, value time.Time) {
 func (h Header) SetAddress(key string, value ...string) error {
 
 	buf := bytes.NewBuffer(nil)
-	for _, a := range value {
-		if e, err := mail.ParseAddress(a); err != nil {
-			return err
-		} else {
+	for _, src := range value {
+
+		emails, err := mail.ParseAddressList(src)
+		if err != nil {
+			return errors.New(fmt.Sprintf("Field '%s': %s (addresses: %q)", key, err.Error(), value))
+		}
+
+		for _, e := range emails {
 			if buf.Len() > 0 {
 				buf.WriteString(",")
 			}
@@ -40,7 +45,7 @@ func (h Header) SetAddress(key string, value ...string) error {
 		}
 	}
 
-	// result examples:
+	// Result examples:
 	// - box@gmail.com
 	// - Alias <box@gmail.com>
 	// - box1@gmail.com; box2@gmail.com
@@ -79,7 +84,7 @@ func (h Header) SetValue(key, value string, params HeaderParams) {
 		}
 	}
 
-	// result examples:
+	// Result examples:
 	// - image/jpeg; name="f7fb566a3f724874bf53cdb8e3b37d7a.jpg"
 	// - f7fb566a3f724874bf53cdb8e3b37d7a.jpg
 	// - attachment; filename="f7fb566a3f724874bf53cdb8e3b37d7a.jpg"; size=41681; creation-date="Tue, 27 Dec 2016 12:29:43 GMT"
@@ -90,7 +95,7 @@ func (h Header) SetValue(key, value string, params HeaderParams) {
 
 func (h Header) Bytes() []byte {
 
-	// result example:
+	// Result example:
 	//
 	// Content-Type: image/jpeg; name="f7fb566a3f724874bf53cdb8e3b37d7a.jpg"
 	// Content-Description: f7fb566a3f724874bf53cdb8e3b37d7a.jpg
