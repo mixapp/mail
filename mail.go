@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
@@ -18,12 +19,13 @@ import (
 )
 
 type SmtpClient struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	From     string
-	TLS      bool // TODO remove, because don't use in the this library
+	Host        string
+	Port        string
+	User        string
+	Password    string
+	Workstation string // NTLM authentication mechanism
+	From        string
+	TLS         bool // TODO remove, because don't use in the library
 }
 
 type Attachment struct {
@@ -40,7 +42,7 @@ type Message struct {
 	ReplyTo         string
 	Subject         string
 	Body            string
-	BodyContentType string // TODO remove, because don't use in the this library
+	BodyContentType string // TODO remove, because don't use in the library
 	Attachments     map[string]*Attachment
 }
 
@@ -51,7 +53,7 @@ func NewMessage(smtpClient *SmtpClient, to string, subject string, body string) 
 		Subject:         subject,
 		To:              to,
 		Body:            body,
-		BodyContentType: getContentType([]byte(body)), // TODO remove, because don't use in the this library
+		BodyContentType: getContentType([]byte(body)), // TODO remove, because don't use in the library
 		Attachments:     make(map[string]*Attachment),
 	}
 }
@@ -141,7 +143,7 @@ func (m *Message) SendMail() error {
 
 	// SEND MESSAGE
 
-	c, err := newNetSmtpClient(&m.smtpClient)
+	c, err := newSmtpClient(&m.smtpClient)
 	if err != nil {
 		return err
 	}
@@ -189,15 +191,15 @@ func (m *Message) SendMail() error {
 	return nil
 }
 
-func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
+func newSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
 
 	servername := fmt.Sprintf("%s:%s", smtpClient.Host, smtpClient.Port)
-	host, port, err := net.SplitHostPort(servername)
+	host, _, err := net.SplitHostPort(servername)
 	if err != nil {
 		return nil, err
 	}
 
-	var IS_SSL = port == "465"
+	IS_TLS := needTLSConnection(servername)
 
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: true,
@@ -209,7 +211,7 @@ func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
 		return nil, err
 	}
 
-	if IS_SSL {
+	if IS_TLS {
 		conn = tls.Client(conn, tlsconfig)
 	}
 
@@ -218,7 +220,7 @@ func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
 		return nil, err
 	}
 
-	if !IS_SSL {
+	if !IS_TLS {
 		if ok, _ := c.Extension("STARTTLS"); ok {
 			if err := c.StartTLS(tlsconfig); err != nil {
 				c.Close()
@@ -228,12 +230,24 @@ func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
 	}
 
 	if len(smtpClient.User) > 0 {
-
 		if ok, auths := c.Extension("AUTH"); ok {
 			var auth smtp.Auth
 
 			if strings.Contains(auths, "CRAM-MD5") {
 				auth = smtp.CRAMMD5Auth(smtpClient.User, smtpClient.Password)
+			} else if strings.Contains(auths, "NTLM") {
+				a, err := NewNTLMAuth(host, smtpClient.User, smtpClient.Password, smtpClient.Workstation)
+				if err != nil {
+					c.Close()
+					return nil, err
+				}
+
+				if err := SmtpNTLMAuthenticate(c, a); err != nil {
+					c.Close()
+					return nil, err
+				}
+
+				return c, nil
 			} else {
 				auth = smtp.PlainAuth("", smtpClient.User, smtpClient.Password, host)
 			}
@@ -246,6 +260,27 @@ func newNetSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
 	}
 
 	return c, nil
+}
+
+func needTLSConnection(address string) bool {
+
+	tlsconfig := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         address,
+	}
+
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		return false
+	}
+
+	conn = tls.Client(conn, tlsconfig)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
+	_, err = bufio.NewReader(conn).ReadString('\n')
+
+	return err == nil
 }
 
 func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, filename string) error {
