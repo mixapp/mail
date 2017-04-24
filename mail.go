@@ -1,32 +1,17 @@
 package mail
 
 import (
-	"bufio"
 	"bytes"
-	"crypto/tls"
 	"encoding/base64"
-	"fmt"
 	"io/ioutil"
 	"mime"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/mail"
-	"net/smtp"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-type SmtpClient struct {
-	Host        string
-	Port        string
-	User        string
-	Password    string
-	Workstation string // NTLM authentication mechanism
-	From        string
-	TLS         bool // TODO remove, because don't use in the library
-}
 
 type Attachment struct {
 	Filename string
@@ -142,12 +127,10 @@ func (m *Message) SendMail() error {
 	}
 
 	// SEND MESSAGE
-
-	c, err := newSmtpClient(&m.smtpClient)
+	c, err := m.smtpClient.Connection()
 	if err != nil {
 		return err
 	}
-	defer c.Close()
 
 	if e, err := mail.ParseAddress(m.smtpClient.From); err != nil {
 		return err
@@ -189,98 +172,6 @@ func (m *Message) SendMail() error {
 	}
 
 	return nil
-}
-
-func newSmtpClient(smtpClient *SmtpClient) (*smtp.Client, error) {
-
-	servername := fmt.Sprintf("%s:%s", smtpClient.Host, smtpClient.Port)
-	host, _, err := net.SplitHostPort(servername)
-	if err != nil {
-		return nil, err
-	}
-
-	IS_TLS := needTLSConnection(servername)
-
-	tlsconfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         host,
-	}
-
-	conn, err := net.DialTimeout("tcp", servername, 10*time.Second)
-	if err != nil {
-		return nil, err
-	}
-
-	if IS_TLS {
-		conn = tls.Client(conn, tlsconfig)
-	}
-
-	c, err := smtp.NewClient(conn, host)
-	if err != nil {
-		return nil, err
-	}
-
-	if !IS_TLS {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(tlsconfig); err != nil {
-				c.Close()
-				return nil, err
-			}
-		}
-	}
-
-	if len(smtpClient.User) > 0 {
-		if ok, auths := c.Extension("AUTH"); ok {
-			var auth smtp.Auth
-
-			if strings.Contains(auths, "CRAM-MD5") {
-				auth = smtp.CRAMMD5Auth(smtpClient.User, smtpClient.Password)
-			} else if strings.Contains(auths, "NTLM") {
-				a, err := NewNTLMAuth(host, smtpClient.User, smtpClient.Password, smtpClient.Workstation)
-				if err != nil {
-					c.Close()
-					return nil, err
-				}
-
-				if err := SmtpNTLMAuthenticate(c, a); err != nil {
-					c.Close()
-					return nil, err
-				}
-
-				return c, nil
-			} else {
-				auth = smtp.PlainAuth("", smtpClient.User, smtpClient.Password, host)
-			}
-
-			if err := c.Auth(auth); err != nil {
-				c.Close()
-				return nil, err
-			}
-		}
-	}
-
-	return c, nil
-}
-
-func needTLSConnection(address string) bool {
-
-	tlsconfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         address,
-	}
-
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-	if err != nil {
-		return false
-	}
-
-	conn = tls.Client(conn, tlsconfig)
-	defer conn.Close()
-
-	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
-	_, err = bufio.NewReader(conn).ReadString('\n')
-
-	return err == nil
 }
 
 func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, filename string) error {
