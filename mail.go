@@ -2,29 +2,16 @@ package mail
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/base64"
-	"fmt"
 	"io/ioutil"
 	"mime"
-	"net"
-	"net/mail"
-	"net/smtp"
+	"mime/multipart"
+	"net/http"
+	netmail "net/mail"
 	"path/filepath"
 	"strings"
 	"time"
-	"gopkg.in/gomail.v2"
-	"strconv"
 )
-
-type SmtpClient struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	From     string
-	TLS      bool
-}
 
 type Attachment struct {
 	Filename string
@@ -40,7 +27,7 @@ type Message struct {
 	ReplyTo         string
 	Subject         string
 	Body            string
-	BodyContentType string
+	BodyContentType string // TODO remove, because don't use in the library
 	Attachments     map[string]*Attachment
 }
 
@@ -51,7 +38,7 @@ func NewMessage(smtpClient *SmtpClient, to string, subject string, body string) 
 		Subject:         subject,
 		To:              to,
 		Body:            body,
-		BodyContentType: "text/html",
+		BodyContentType: getContentType([]byte(body)), // TODO remove, because don't use in the library
 		Attachments:     make(map[string]*Attachment),
 	}
 }
@@ -76,149 +63,176 @@ func (m *Message) Attach(file string, inline bool) error {
 
 func (m *Message) SendMail() error {
 
-	buf := bytes.NewBuffer(nil)
-	buf.WriteString("From: " + m.smtpClient.From + "\r\n")
-	buf.WriteString("To: " + m.To + "\r\n")
-	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString("Date: " + time.Now().Format(time.RFC822) + "\r\n")
+	// MESSAGE HEADER
+
+	header := Header{}
+	header.SetString("MIME-Version", "1.0")
+	header.SetString("Subject", m.Subject)
+	header.SetDate("Date", time.Now())
+
+	if err := header.SetAddress("From", m.smtpClient.From); err != nil {
+		return err
+	}
+
+	if err := header.SetAddress("To", m.To); err != nil {
+		return err
+	}
 
 	if len(m.Cc) > 0 {
-		buf.WriteString("Cc: " + strings.Join(m.Cc, ",") + "\r\n")
+		if err := header.SetAddress("Cc", m.Cc...); err != nil {
+			return err
+		}
 	}
 
-	buf.WriteString("Subject: " + m.Subject + "\r\n")
+	if len(m.Bcc) > 0 {
+		if err := header.SetAddress("Bcc", m.Bcc...); err != nil {
+			return err
+		}
+	}
 
 	if len(m.ReplyTo) > 0 {
-		buf.WriteString("Reply-To: " + m.ReplyTo + "\r\n")
+		if err := header.SetAddress("Reply-To", m.ReplyTo); err != nil {
+			return err
+		}
 	}
 
-	/* Генерация тела сообщения */
-	const boundary = "f46d043c813270fc6b04c2d223da"
+	// MESSAGE BODY
 
-	if len(m.Attachments) > 0 {
-		buf.WriteString("Content-Type: multipart/mixed; boundary=" + boundary + "\r\n\r\n")
-		buf.WriteString("--" + boundary + "\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-		buf.WriteString("Content-Type: " + m.BodyContentType + "; charset=utf-8\r\n\r\n")
-		buf.WriteString(m.Body)
-		buf.WriteString("\r\n")
-	} else {
-		buf.WriteString("Content-Type: " + m.BodyContentType + "; charset=utf-8\r\n\r\n")
-		buf.WriteString(m.Body)
-		buf.WriteString("\r\n")
-	}
+	body := bytes.NewBuffer(nil)
+	bodySrc := []byte(m.Body)
 
-	if len(m.Attachments) > 0 {
-		for _, attachment := range m.Attachments {
-			buf.WriteString("\r\n\r\n--" + boundary + "\r\n")
+	switch len(m.Attachments) {
+	case 0:
+		header.SetString("Content-Type", getContentType(bodySrc))
+		body.Write(bodySrc)
 
-			if attachment.Inline {
-				buf.WriteString("Content-Type: message/rfc822\r\n")
-				buf.WriteString("Content-Disposition: inline; filename=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n\r\n")
+	default:
 
-				buf.Write(attachment.Data)
-			} else {
-				buf.WriteString("Content-Disposition: attachment; filename=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n")
-				buf.WriteString("Content-Transfer-Encoding: base64\r\n")
-				buf.WriteString("Content-Type: application/octet-stream; name=\"" + mime.QEncoding.Encode("utf-8", attachment.Filename) + "\"\r\n\r\n")
+		multipartWriter := multipart.NewWriter(body)
+		header.SetValue("Content-Type", "multipart/mixed", HeaderParams{"boundary": multipartWriter.Boundary()})
 
-				b := make([]byte, base64.StdEncoding.EncodedLen(len(attachment.Data)))
-				base64.StdEncoding.Encode(b, attachment.Data)
-
-				// write base64 content in lines of up to 76 chars
-				for i, l := 0, len(b); i < l; i++ {
-					buf.WriteByte(b[i])
-					if (i+1)%76 == 0 {
-						buf.WriteString("\r\n")
-					}
-				}
-			}
-
-			buf.WriteString("\r\n--" + boundary)
+		if err := attachData(multipartWriter, bodySrc, true, ""); err != nil {
+			return err
 		}
 
-		buf.WriteString("--")
+		for _, attachment := range m.Attachments {
+			if err := attachData(multipartWriter, attachment.Data, attachment.Inline, attachment.Filename); err != nil {
+				return err
+			}
+		}
+
+		if err := multipartWriter.Close(); err != nil {
+			return err
+		}
 	}
 
-	/*=======================================*/
-	servername := fmt.Sprintf("%s:%s", m.smtpClient.Host, m.smtpClient.Port)
-	host, _, _ := net.SplitHostPort(servername)
-	auth := smtp.PlainAuth("", m.smtpClient.User, m.smtpClient.Password, host)
-
-	if !m.smtpClient.TLS {
-
-		mail := gomail.NewMessage()
-		mail.SetHeader("From", m.smtpClient.From)
-		mail.SetHeader("To", m.To)
-		mail.SetHeader("Subject", m.Subject)
-		mail.SetBody(m.BodyContentType, m.Body)
-
-		port, _ := strconv.Atoi(m.smtpClient.Port)
-		d := gomail.NewDialer(m.smtpClient.Host, port, m.smtpClient.User, m.smtpClient.Password)
-		d.TLSConfig = &tls.Config{InsecureSkipVerify: true}
-
-		err := d.DialAndSend(mail)
-		return err
-	}
-
-	/* Актуально для TLS */
-
-	tlsconfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         host,
-	}
-
-	dl := new(net.Dialer)
-	dl.Timeout = 10 * time.Second
-	conn, err := tls.DialWithDialer(dl, "tcp", servername, tlsconfig)
-
-	//conn, err := tls.Dial("tcp", servername, tlsconfig)
+	// SEND MESSAGE
+	c, err := m.smtpClient.Connection()
 	if err != nil {
 		return err
 	}
 
-	c, err := smtp.NewClient(conn, host)
-	defer func() {
-		c.Quit()
-	}()
-	if err != nil {
+	if e, err := netmail.ParseAddress(m.smtpClient.From); err != nil {
+		return err
+	} else if err = c.Mail(e.Address); err != nil {
 		return err
 	}
 
-	// Auth
-	if err = c.Auth(auth); err != nil {
-		return err
+	recipientsList := []string{m.To}
+	if m.Cc != nil {
+		recipientsList = append(recipientsList, strings.Join(m.Cc, ","))
+	}
+	if m.Bcc != nil {
+		recipientsList = append(recipientsList, strings.Join(m.Bcc, ","))
 	}
 
-	// To && From
-	emailFrom, err := mail.ParseAddress(m.smtpClient.From)
-	if err != nil {
-		return err
+	for _, recipients := range recipientsList {
+
+		if emails, err := parseAdresses(recipients); err != nil {
+			return err
+		} else {
+			for _, e := range emails {
+				if err = c.Rcpt(e.Address); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
-	if err = c.Mail(emailFrom.Address); err != nil {
-		return err
-	}
+	msg := bytes.NewBuffer(header.Bytes())
+	msg.WriteString("\r\n")
+	msg.Write(body.Bytes())
 
-	if err = c.Rcpt(m.To); err != nil {
+	if w, err := c.Data(); err != nil {
 		return err
-	}
-
-	// Data
-	w, err := c.Data()
-	if err != nil {
+	} else if _, err = w.Write(msg.Bytes()); err != nil {
 		return err
-	}
-
-	_, err = w.Write(buf.Bytes())
-	if err != nil {
-		return err
-	}
-
-	err = w.Close()
-	if err != nil {
+	} else if err = w.Close(); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func attachData(multipartWriter *multipart.Writer, src []byte, inline bool, filename string) error {
+
+	// Example:
+	// 	--3379bd9a9b4ba7731a26ac044694f6f30cd02b0f9fd0c9a123531d163625
+	// Content-Description: .gitignore
+	// Content-Disposition: inline; filename=".gitignore"
+	// Content-Transfer-Encoding: base64
+	// Content-Type: text/html; charset=utf-8; name=".gitignore"
+
+	// PGh0bWw+PC9odG1sPg==
+	// --3379bd9a9b4ba7731a26ac044694f6f30cd02b0f9fd0c9a123531d163625--
+
+	var (
+		contentDescription                   string
+		contentTypeParams, dispositionParams = HeaderParams{}, HeaderParams{}
+	)
+
+	data := []byte(base64.StdEncoding.EncodeToString(src))
+
+	dispositionType := "attachment"
+	if inline {
+		dispositionType = "inline"
+	}
+
+	if len(filename) > 0 {
+		dispositionParams["filename"] = filename
+		contentTypeParams["name"] = filename
+		contentDescription = filename
+	}
+
+	header := Header{}
+	header.SetString("Content-Transfer-Encoding", "base64")
+	header.SetValue("Content-Type", getContentType(src), contentTypeParams)
+	header.SetValue("Content-Disposition", dispositionType, dispositionParams)
+
+	if len(contentDescription) > 0 {
+		header.SetString("Content-Description", contentDescription)
+	}
+
+	if part, err := multipartWriter.CreatePart(header.MIMEHeader()); err != nil {
+		return err
+	} else {
+		part.Write(data)
+	}
+
+	return nil
+}
+
+func getQEncodeString(src string) string {
+	return mime.QEncoding.Encode("utf-8", src)
+}
+
+func getContentType(src []byte) string {
+	return http.DetectContentType(src)
+}
+
+var delimeterReplacer = strings.NewReplacer(";", ",")
+
+func parseAdresses(src string) ([]*netmail.Address, error) {
+	src = delimeterReplacer.Replace(src)
+	return netmail.ParseAddressList(src)
 }
