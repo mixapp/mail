@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net/mail"
 	"net/textproto"
 	"strings"
 	"time"
@@ -32,7 +31,7 @@ func (h Header) SetAddress(key string, value ...string) error {
 	buf := bytes.NewBuffer(nil)
 	for _, src := range value {
 
-		emails, err := mail.ParseAddressList(src)
+		emails, err := parseAdresses(src)
 		if err != nil {
 			return errors.New(fmt.Sprintf("Field '%s': %s (addresses: %q)", key, err.Error(), value))
 		}

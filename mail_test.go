@@ -72,9 +72,14 @@ func TestSend(t *testing.T) {
 			t.Fatal("Fail test.")
 		}
 
+		delimeter := ","
+		if testIndex%2 == 1 {
+			delimeter = ";"
+		}
+
 		msg := Message{
 			smtpClient:  *SMTP,
-			To:          strings.Join([]string{to, to}, ","),
+			To:          strings.Join([]string{to, to, to}, delimeter),
 			Cc:          []string{to, to},
 			Bcc:         []string{to, to},
 			ReplyTo:     to,

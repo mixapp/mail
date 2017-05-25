@@ -7,7 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/mail"
+	netmail "net/mail"
 	"path/filepath"
 	"strings"
 	"time"
@@ -132,7 +132,7 @@ func (m *Message) SendMail() error {
 		return err
 	}
 
-	if e, err := mail.ParseAddress(m.smtpClient.From); err != nil {
+	if e, err := netmail.ParseAddress(m.smtpClient.From); err != nil {
 		return err
 	} else if err = c.Mail(e.Address); err != nil {
 		return err
@@ -148,7 +148,7 @@ func (m *Message) SendMail() error {
 
 	for _, recipients := range recipientsList {
 
-		if emails, err := mail.ParseAddressList(recipients); err != nil {
+		if emails, err := parseAdresses(recipients); err != nil {
 			return err
 		} else {
 			for _, e := range emails {
@@ -228,4 +228,11 @@ func getQEncodeString(src string) string {
 
 func getContentType(src []byte) string {
 	return http.DetectContentType(src)
+}
+
+var delimeterReplacer = strings.NewReplacer(";", ",")
+
+func parseAdresses(src string) ([]*netmail.Address, error) {
+	src = delimeterReplacer.Replace(src)
+	return netmail.ParseAddressList(src)
 }
