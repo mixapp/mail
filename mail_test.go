@@ -12,18 +12,9 @@ import (
 	"time"
 )
 
-// You can use that 'https://hub.docker.com/r/velaluqa/iredmail/' mail server for tests
-
 func TestSend(t *testing.T) {
 
-	SMTP := SmtpClient{
-		Host:     "localhost",
-		Port:     "587",
-		User:     "postmaster@example.org",
-		Password: "teivVedJin",
-		From:     "postmaster@example.org",
-	}
-
+	SMTP := getSmtpClient()
 	to := "postmaster@example.org"
 
 	attachment1 := Attachment{
@@ -81,9 +72,14 @@ func TestSend(t *testing.T) {
 			t.Fatal("Fail test.")
 		}
 
+		delimeter := ","
+		if testIndex%2 == 1 {
+			delimeter = ";"
+		}
+
 		msg := Message{
-			smtpClient:  SMTP,
-			To:          strings.Join([]string{to, to}, ","),
+			smtpClient:  *SMTP,
+			To:          strings.Join([]string{to, to, to}, delimeter),
 			Cc:          []string{to, to},
 			Bcc:         []string{to, to},
 			ReplyTo:     to,
