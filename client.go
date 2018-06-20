@@ -21,7 +21,6 @@ type SmtpClient struct {
 	Port        string
 	User        string
 	Password    string
-	Workstation string // NTLM authentication mechanism
 	From        string
 	MaxLifetime time.Duration
 	TLSConfig   *tls.Config
@@ -114,18 +113,6 @@ func (c *SmtpClient) internalInit() (*smtp.Client, error) {
 
 			if strings.Contains(auths, "CRAM-MD5") {
 				auth = smtp.CRAMMD5Auth(c.User, c.Password)
-			} else if strings.Contains(auths, "NTLM") {
-				auth = nil
-				a, err := NewNTLMAuth(host, c.User, c.Password, c.Workstation)
-
-				if err != nil {
-					cl.Close()
-					return nil, err
-				} else if err := SmtpNTLMAuthenticate(cl, a); err != nil {
-					cl.Close()
-					return nil, err
-				}
-
 			} else {
 				auth = smtp.PlainAuth("", c.User, c.Password, host)
 			}
