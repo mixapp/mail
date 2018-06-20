@@ -2,3 +2,6 @@
 *.sublime-workspace
 *.out
 *.test
+
+vendor/**
+!/vendor/vendor.json
